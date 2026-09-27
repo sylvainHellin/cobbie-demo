@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -48,13 +49,70 @@ class Session:
 
 SESSIONS: dict[str, Session] = {}
 
+# Kernel-variable handoff: the agent stores answer groups in `answer_elements`
+# (label -> GlobalIds or entities) and the backend reads them after the turn.
+MAX_GROUP_SIZE = 5000
+_ELEMENTS_MARKER = "__COBBIE_ANSWER_ELEMENTS__"
+_CLEAR_ELEMENTS = "answer_elements = {}\n"
+_DUMP_HELPER = f'''\
+def _cobbie_dump_answer_elements():
+    import json
+    ae = globals().get("answer_elements")
+    out = {{}}
+    if isinstance(ae, dict):
+        for label, items in ae.items():
+            if isinstance(items, (str, ifcopenshell.entity_instance)):
+                items = [items]
+            try:
+                items = list(items)
+            except TypeError:
+                continue
+            ids = []
+            for x in items:
+                if isinstance(x, int):
+                    try:
+                        x = model.by_id(x)
+                    except Exception:
+                        continue
+                gid = getattr(x, "GlobalId", x)
+                if isinstance(gid, str):
+                    ids.append(gid)
+                if len(ids) >= {MAX_GROUP_SIZE}:
+                    break
+            out[str(label)] = ids
+    print({_ELEMENTS_MARKER!r} + json.dumps(out))
+'''
+_DUMP_ELEMENTS = "_cobbie_dump_answer_elements()\n"
+
 
 def _preamble(path: Path) -> str:
     return (
         "import ifcopenshell, ifcopenshell.util.element, ifcopenshell.util.unit\n"
         f"ifc_path = {str(path)!r}\n"
         "model = ifcopenshell.open(ifc_path)\n"
+        + _CLEAR_ELEMENTS
+        + _DUMP_HELPER
     )
+
+
+def _clear_answer_elements(interp: JupyterInterpreter) -> None:
+    interp.execute(_CLEAR_ELEMENTS, timeout=10)
+
+
+def _read_answer_elements(interp: JupyterInterpreter) -> dict[str, list[str]]:
+    """Read `answer_elements` from the kernel as {label: [GlobalId, ...]}; {} on any failure."""
+    res = interp.execute(_DUMP_ELEMENTS, timeout=60, truncate=False)
+    idx = res.text.rfind(_ELEMENTS_MARKER)
+    if res.timed_out or idx < 0:
+        log.warning("could not read answer_elements: %s", res.text[:500])
+        return {}
+    line = res.text[idx + len(_ELEMENTS_MARKER) :].splitlines()[0]
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        log.warning("answer_elements is not valid JSON")
+        return {}
+    return {str(k): [str(g) for g in v] for k, v in data.items() if isinstance(v, list)}
 
 
 @asynccontextmanager
@@ -128,13 +186,50 @@ class ChatRequest(BaseModel):
     message: str
 
 
-def _enrich(ifc: ifcopenshell.file, answer: Answer) -> list[dict]:
-    """Resolve GlobalIds against the in-process model; drop unknown ids and empty groups."""
+_COUNT_SUFFIX = re.compile(r"\s*\(\s*\d+\s*\)\s*$")
+
+
+def _norm_label(label: str) -> str:
+    return _COUNT_SUFFIX.sub("", label).strip().casefold()
+
+
+def _with_count(label: str, n: int) -> str:
+    """Label ending in the actual element count, replacing any count the model wrote."""
+    base = _COUNT_SUFFIX.sub("", label).strip() or label.strip()
+    return f"{base} ({n})"
+
+
+def _group_ids(label: str, global_ids: list[str], kernel: dict[str, list[str]]) -> list[str]:
+    """Ids for one answer group: the kernel group with that label, else the hand-listed ids."""
+    if label in kernel:
+        return kernel[label]
+    norm = _norm_label(label)
+    for k, v in kernel.items():
+        if _norm_label(k) == norm:
+            return v
+    return global_ids
+
+
+def _enrich(ifc: ifcopenshell.file, answer: Answer, kernel: dict[str, list[str]]) -> list[dict]:
+    """Resolve each answer group's GlobalIds against the in-process model.
+
+    Ids come from the kernel's `answer_elements` (matched by label) or, as a
+    fallback, from the hand-listed `global_ids`. If the answer lists no group
+    but the kernel holds some, all kernel groups are shown. Unknown ids and
+    empty groups are dropped, each group is capped at MAX_GROUP_SIZE, and the
+    label gets the resolved count.
+    """
+    if answer.element_groups:
+        wanted = [(g.label, _group_ids(g.label, g.global_ids, kernel)) for g in answer.element_groups]
+    else:
+        wanted = list(kernel.items())
     groups = []
-    for g in answer.element_groups:
+    for label, ids in wanted:
         seen: set[str] = set()
         elements = []
-        for gid in g.global_ids:
+        for gid in ids:
+            if len(elements) >= MAX_GROUP_SIZE:
+                break
             gid = gid.strip()
             if not gid or gid in seen:
                 continue
@@ -149,7 +244,7 @@ def _enrich(ifc: ifcopenshell.file, answer: Answer) -> list[dict]:
                 {"global_id": gid, "ifc_class": el.is_a(), "name": getattr(el, "Name", None)}
             )
         if elements:
-            groups.append({"label": g.label, "elements": elements})
+            groups.append({"label": _with_count(label, len(elements)), "elements": elements})
     return groups
 
 
@@ -168,13 +263,17 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         t0 = time.perf_counter()
         async with s.lock:
             try:
+                # Stale groups from the previous question must not leak into this one.
+                await run_in_threadpool(_clear_answer_elements, s.interp)
                 async for ev in stream_turn(s.agent, s.thread_id, message):
                     if ev["type"] == "answer":
                         ans: Answer = ev["answer"]
+                        kernel = await run_in_threadpool(_read_answer_elements, s.interp)
+                        groups = await run_in_threadpool(_enrich, s.ifc, ans, kernel)
                         ev = {
                             "type": "answer",
                             "text": ans.text,
-                            "element_groups": _enrich(s.ifc, ans),
+                            "element_groups": groups,
                             "sufficient_info": ans.sufficient_info,
                         }
                     yield _sse(ev)

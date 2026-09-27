@@ -84,12 +84,16 @@ class JupyterInterpreter:
     def run(self, code: str, timeout: int = 60) -> str:
         return self.execute(code, timeout=timeout).text
 
-    def execute(self, code: str, timeout: int = 60) -> ExecResult:
-        """Execute ``code`` and collect stdout, stderr, results and tracebacks."""
-        with self._lock:
-            return self._execute_locked(code, timeout)
+    def execute(self, code: str, timeout: int = 60, *, truncate: bool = True) -> ExecResult:
+        """Execute ``code`` and collect stdout, stderr, results and tracebacks.
 
-    def _execute_locked(self, code: str, timeout: int) -> ExecResult:
+        ``truncate=False`` returns the full output, for backend-internal reads
+        that never reach the LLM.
+        """
+        with self._lock:
+            return self._execute_locked(code, timeout, truncate=truncate)
+
+    def _execute_locked(self, code: str, timeout: int, *, truncate: bool = True) -> ExecResult:
         msg_id = self.kc.execute(code)
         parts: list[str] = []
         deadline = time.monotonic() + timeout
@@ -124,6 +128,8 @@ class JupyterInterpreter:
                 f"[Timeout] Execution exceeded {timeout}s and was interrupted.",
                 timed_out=True,
             )
+        if not truncate:
+            return ExecResult("".join(parts))
         text, truncated = truncate_by_tokens("".join(parts), self.max_output_tokens)
         return ExecResult(text, truncated=truncated)
 

@@ -1,7 +1,9 @@
 """In-process smoke test of the backend (no server).
 
-Uploads samples/fzk_house_arc.ifc, asks a question and a follow-up, prints the
-streamed events compactly, and asserts the answer contract.
+Uploads samples/fzk_house_arc.ifc, asks a question and a follow-up, then
+uploads samples/duplex_arc.ifc and asks for all walls (a large group that must
+come through the `answer_elements` kernel handoff). Prints the streamed events
+compactly and asserts the answer contract.
 
 Run: uv run python scripts/smoke_backend.py
 """
@@ -16,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import ifcopenshell  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.app import app  # noqa: E402
@@ -25,6 +28,9 @@ QUESTIONS = [
     "How many doors are there and on which storeys?",
     "Which of them is the widest?",
 ]
+WALLS_SAMPLE = ROOT / "samples" / "duplex_arc.ifc"
+WALLS_QUESTION = "Show me all the walls"
+WALL_CLASSES = {"IfcWall", "IfcWallStandardCase"}
 
 
 def _short(text: str, n: int = 160) -> str:
@@ -62,7 +68,34 @@ def ask(client: TestClient, model_id: str, question: str) -> tuple[list[dict], f
     return events, time.perf_counter() - t0
 
 
-def check(events: list[dict]) -> dict:
+def upload(client: TestClient, path: Path) -> dict:
+    t0 = time.perf_counter()
+    with path.open("rb") as f:
+        r = client.post("/api/models", files={"file": (path.name, f, "application/octet-stream")})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    print(f"upload: {info} ({time.perf_counter() - t0:.1f} s)")
+    return info
+
+
+def check_walls(events: list[dict]) -> None:
+    """One group holds exactly the model's walls, handed over via `answer_elements`."""
+    ans = check(events, expect_class=None)
+    codes = [e["code"] for e in events if e["type"] == "code"]
+    assert any("answer_elements" in c for c in codes), "agent did not use answer_elements"
+    n_walls = len(ifcopenshell.open(str(WALLS_SAMPLE)).by_type("IfcWall"))
+    matches = [
+        g
+        for g in ans["element_groups"]
+        if {e["ifc_class"] for e in g["elements"]} <= WALL_CLASSES and len(g["elements"]) == n_walls
+    ]
+    sizes = [(g["label"], len(g["elements"])) for g in ans["element_groups"]]
+    assert matches, f"no group of all {n_walls} walls: {sizes}"
+    assert matches[0]["label"].endswith(f"({n_walls})"), matches[0]["label"]
+    print(f"  walls: group {matches[0]['label']!r} matches by_type('IfcWall') = {n_walls}")
+
+
+def check(events: list[dict], expect_class: str | None = "IfcDoor") -> dict:
     types = [e["type"] for e in events]
     assert "error" not in types, [e for e in events if e["type"] == "error"]
     assert "code" in types, "no code event"
@@ -77,19 +110,15 @@ def check(events: list[dict]) -> dict:
         for e in g["elements"]:
             assert len(e["global_id"]) == 22, e
     classes = {e["ifc_class"] for g in ans["element_groups"] for e in g["elements"]}
-    assert "IfcDoor" in classes, f"no IfcDoor among enriched elements: {classes}"
+    if expect_class:
+        assert expect_class in classes, f"no {expect_class} among enriched elements: {classes}"
     return ans
 
 
 def main() -> None:
     with TestClient(app) as client:
         assert client.get("/api/health").json()["status"] == "ok"
-        t0 = time.perf_counter()
-        with SAMPLE.open("rb") as f:
-            r = client.post("/api/models", files={"file": (SAMPLE.name, f, "application/octet-stream")})
-        assert r.status_code == 200, r.text
-        info = r.json()
-        print(f"upload: {info} ({time.perf_counter() - t0:.1f} s)")
+        info = upload(client, SAMPLE)
         bad = client.post("/api/models", files={"file": ("x.txt", b"hello", "text/plain")})
         assert bad.status_code == 400, bad.text
 
@@ -102,8 +131,13 @@ def main() -> None:
         r = client.post(f"/api/models/{info['model_id']}/reset")
         assert r.status_code == 200, r.text
 
+        walls_info = upload(client, WALLS_SAMPLE)
+        events, dt = ask(client, walls_info["model_id"], WALLS_QUESTION)
+        check_walls(events)
+        latencies.append(dt)
+
     print("\nPASS")
-    for q, dt in zip(QUESTIONS, latencies):
+    for q, dt in zip([*QUESTIONS, f"{WALLS_QUESTION} ({WALLS_SAMPLE.name})"], latencies):
         print(f"  {dt:6.1f} s  {q}")
 
 

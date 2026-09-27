@@ -37,9 +37,12 @@ RECURSION_LIMIT = 100
 class ElementGroup(BaseModel):
     """A group of IFC elements the answer refers to, shown as one chip."""
 
-    label: str = Field(description="Short label with the count, e.g. 'Doors on Erdgeschoss (5)'.")
+    label: str = Field(
+        description="The key under which the group was stored in the kernel dict `answer_elements`, e.g. 'Doors on Erdgeschoss'."
+    )
     global_ids: list[str] = Field(
-        description="IFC GlobalId values (22-character strings) copied exactly from code output. Never express ids like #123."
+        default_factory=list,
+        description="Leave empty when the group is stored in `answer_elements`. Fallback only: GlobalId values (22-character strings) copied exactly from code output.",
     )
 
 

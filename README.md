@@ -44,6 +44,7 @@ uv run python scripts/smoke_backend.py
 - `GET /api/health`
 - `POST /api/models` with multipart field `file` (`.ifc`) returns `{model_id, filename, schema, n_products}`.
 - `POST /api/chat` with JSON `{model_id, message}` returns a `text/event-stream` of `data: {json}` events: `status`, `code`, `output`, `answer`, `error`, `done`.
+- The `answer` event is `{type, text, element_groups, sufficient_info}`, where each group is `{label, elements: [{global_id, ifc_class, name}]}` and the label ends with the element count, e.g. `All walls (57)`.
 - `POST /api/models/{model_id}/reset` clears the conversation and restarts the kernel.
 
 ## Architecture
@@ -51,5 +52,6 @@ uv run python scripts/smoke_backend.py
 1. `backend/app.py` (FastAPI) keeps one session per uploaded model: the file in `data/uploads/`, an in-process ifcopenshell model, a Jupyter kernel and an agent.
 2. `backend/interpreter.py` runs the kernel, which opens the model as `model` at startup and keeps state across questions.
 3. `backend/agent.py` builds a deepagents agent whose only tool is `python_exec`, capped at 15 code rounds per question before it must answer.
-4. The agent ends each turn with a structured `Answer` (text, element groups of GlobalIds, sufficient_info); an in-memory LangGraph checkpointer gives follow-up questions the earlier turns.
-5. The server resolves each GlobalId against the in-process model (IFC class, name), drops unknown ids, and streams code, outputs and the answer to the UI as they happen.
+4. The agent hands elements to the answer through the kernel dict `answer_elements` (label to GlobalIds or entities), which the server clears at the start of each question, so large groups never pass through the LLM.
+5. The agent ends each turn with a structured `Answer` (text, the labels of the groups to show, sufficient_info); hand-listed `global_ids` per group still work as a fallback, and an in-memory LangGraph checkpointer gives follow-up questions the earlier turns.
+6. After the turn the server reads `answer_elements` from the kernel, resolves each GlobalId against the in-process model (IFC class, name), drops unknown ids, caps each group at 5000 elements, and streams code, outputs and the answer to the UI as they happen.
