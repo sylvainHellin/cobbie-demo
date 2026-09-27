@@ -62,11 +62,15 @@ The fragments worker is bundled by Vite, so the app needs no CDN at runtime.
 
 ## Tests
 
-Smoke test of the backend, in-process, against the live LLM (its assertions on answer content can fail when the agent groups elements differently):
+Smoke test of the backend, in-process, against the live LLM:
 
 ```sh
 uv run python scripts/smoke_backend.py
 ```
+
+It asserts the API contract hard (event types and order, one answer, `done` last, non-empty text, every element id resolving in the model to an expected class) and checks group content on the union of all groups (the 5 doors of fzk_house, all 57 walls of duplex), since the agent may split elements differently from run to run.
+A follow-up answer without groups, or walls not passed through `answer_elements`, prints a warning instead of failing.
+The agent can still occasionally skip the groups on the first question, which fails the run.
 
 End-to-end check in headless Chrome, driven over the DevTools protocol with Node's built-in WebSocket (no extra packages):
 
