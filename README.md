@@ -41,6 +41,7 @@ Then open http://localhost:5173.
 If the backend runs elsewhere, start the frontend with `COBBIE_BACKEND_URL=http://127.0.0.1:8010 pnpm dev`.
 
 `pnpm dev` and `pnpm build` first run `frontend/scripts/copy-wasm.mjs`, which copies the web-ifc wasm into `frontend/public/wasm/` (gitignored).
+web-ifc is pinned to 0.0.77, the version That Open 3.4 is built against; 0.0.78's browser wasm rejects the extra `StreamMeshes` argument That Open passes.
 The fragments worker is bundled by Vite, so the app needs no CDN at runtime.
 
 ## Using the app
@@ -100,7 +101,6 @@ Frontend (`frontend/src/`, Vite, React, TypeScript, plain CSS):
 
 1. `viewer/engine.ts` sets up That Open Components (one world, `SimpleCamera`, `SimpleRenderer`, `FragmentsManager`, `IfcLoader`), handles click picking, and applies group display and selection through fragments highlight, opacity and visibility.
 2. `viewer/properties.ts` turns fragments item data (attributes, `IsDefinedBy`, `ContainedInStructure`) into the property panel's groups; `viewer/ViewerPanel.tsx` and `viewer/PropertyPanel.tsx` render the viewer overlays.
-3. `viewer/webIfcCompat.ts` works around web-ifc 0.0.78, whose browser wasm binds `StreamMeshes` with one argument fewer than its JS wrapper passes; remove it once web-ifc ships a matching build.
-4. `chat/sse.ts` posts to `/api/chat` and parses the event stream from `fetch`; `chat/ChatPanel.tsx`, `chat/AgentTurn.tsx` and `chat/ElementChip.tsx` render the conversation, the agent steps and the chips.
-5. `chat/AnswerMarkdown.tsx` renders answers with react-markdown and handles GFM pipe tables itself, since remark-gfm is not a dependency.
-6. `App.tsx` holds the app state: model load and upload, chat turns, active chip and display mode.
+3. `chat/sse.ts` posts to `/api/chat` and parses the event stream from `fetch`; `chat/ChatPanel.tsx`, `chat/AgentTurn.tsx` and `chat/ElementChip.tsx` render the conversation, the agent steps and the chips.
+4. `chat/AnswerMarkdown.tsx` renders answers with react-markdown and handles GFM pipe tables itself, since remark-gfm is not a dependency.
+5. `App.tsx` holds the app state: model load and upload, chat turns, active chip and display mode.

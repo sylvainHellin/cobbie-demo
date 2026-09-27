@@ -4,9 +4,6 @@ import * as OBC from '@thatopen/components'
 import * as FRAGS from '@thatopen/fragments'
 import * as THREE from 'three'
 import workerUrl from '@thatopen/fragments/worker?url'
-import { installWebIfcCompat } from './webIfcCompat'
-
-installWebIfcCompat()
 
 export type GroupMode = 'highlight' | 'ghost' | 'isolate'
 
