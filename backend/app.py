@@ -18,7 +18,7 @@ from pathlib import Path
 import ifcopenshell
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.agent import Answer, create_ifc_agent, stream_turn
@@ -29,6 +29,7 @@ log = logging.getLogger("cobbie")
 
 ROOT = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = ROOT / "data" / "uploads"
+SAMPLES_DIR = ROOT / "samples"
 
 
 @dataclass
@@ -130,6 +131,23 @@ app = FastAPI(title="cobbie-demo", lifespan=lifespan)
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "model": model_name(), "sessions": len(SESSIONS)}
+
+
+@app.get("/api/samples")
+def list_samples() -> list[dict]:
+    """Sample IFC models shipped with the repo, for the UI's 'Load sample' buttons."""
+    return [
+        {"name": p.name, "size": p.stat().st_size}
+        for p in sorted(SAMPLES_DIR.glob("*.ifc"))
+    ]
+
+
+@app.get("/api/samples/{name}")
+def get_sample(name: str) -> FileResponse:
+    path = SAMPLES_DIR / name
+    if "/" in name or not name.endswith(".ifc") or not path.is_file():
+        raise HTTPException(404, f"Unknown sample {name!r}.")
+    return FileResponse(path, media_type="application/octet-stream", filename=name)
 
 
 def _create_session(filename: str, data: bytes) -> Session:
