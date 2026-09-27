@@ -102,5 +102,5 @@ Frontend (`frontend/src/`, Vite, React, TypeScript, plain CSS):
 1. `viewer/engine.ts` sets up That Open Components (one world, `SimpleCamera`, `SimpleRenderer`, `FragmentsManager`, `IfcLoader`), handles click picking, and applies group display and selection through fragments highlight, opacity and visibility.
 2. `viewer/properties.ts` turns fragments item data (attributes, `IsDefinedBy`, `ContainedInStructure`) into the property panel's groups; `viewer/ViewerPanel.tsx` and `viewer/PropertyPanel.tsx` render the viewer overlays.
 3. `chat/sse.ts` posts to `/api/chat` and parses the event stream from `fetch`; `chat/ChatPanel.tsx`, `chat/AgentTurn.tsx` and `chat/ElementChip.tsx` render the conversation, the agent steps and the chips.
-4. `chat/AnswerMarkdown.tsx` renders answers with react-markdown and handles GFM pipe tables itself, since remark-gfm is not a dependency.
+4. `chat/AnswerMarkdown.tsx` renders answers with react-markdown and remark-gfm (tables in a scrolling wrapper).
 5. `App.tsx` holds the app state: model load and upload, chat turns, active chip and display mode.
