@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from backend.agent import Answer, create_ifc_agent, stream_turn
 from backend.interpreter import JupyterInterpreter
 from backend.llm import model_name
+from backend.prompts import NUDGE_MSG, PromptVariant, get_variant
 
 log = logging.getLogger("cobbie")
 
@@ -40,6 +41,7 @@ class Session:
     ifc: ifcopenshell.file
     interp: JupyterInterpreter
     agent: object
+    variant: PromptVariant
     thread: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -161,8 +163,9 @@ def _create_session(filename: str, data: bytes) -> Session:
         path.unlink(missing_ok=True)
         raise HTTPException(422, f"Not a readable IFC file: {exc}") from exc
     interp = JupyterInterpreter(preamble=_preamble(path))
-    agent = create_ifc_agent(interp)
-    return Session(model_id, filename, path, ifc, interp, agent)
+    variant = get_variant()
+    agent = create_ifc_agent(interp, variant=variant)
+    return Session(model_id, filename, path, ifc, interp, agent, variant)
 
 
 @app.post("/api/models")
@@ -266,6 +269,49 @@ def _enrich(ifc: ifcopenshell.file, answer: Answer, kernel: dict[str, list[str]]
     return groups
 
 
+def _dangling_labels(answer: Answer, groups: list[dict]) -> list[str]:
+    """Labels the Answer lists that resolved to no element (never stored, or a typo)."""
+    resolved = {_norm_label(g["label"]) for g in groups}
+    return [g.label for g in answer.element_groups if _norm_label(g.label) not in resolved]
+
+
+async def _answer_turn(s: Session, message: str):
+    """Run one question and yield its events, the answer with resolved groups.
+
+    With a nudging variant, an answer listing a group label that resolves to
+    no element (the model meant to show elements but never stored them) gets
+    exactly one corrective turn (NUDGE_MSG); its answer replaces the first one.
+    """
+    wrap_up = s.variant.wrap_up
+    prompt, nudges_left = message, int(s.variant.nudge)
+    while True:
+        answer: Answer | None = None
+        async for ev in stream_turn(s.agent, s.thread_id, prompt, wrap_up=wrap_up):
+            if ev["type"] == "answer":
+                answer = ev["answer"]
+            else:
+                yield ev
+        if answer is None:  # stream_turn raises first; guard for type checkers
+            raise RuntimeError("The agent ended without producing an answer.")
+        kernel = await run_in_threadpool(_read_answer_elements, s.interp)
+        groups = await run_in_threadpool(_enrich, s.ifc, answer, kernel)
+        dangling = _dangling_labels(answer, groups)
+        if not dangling or nudges_left <= 0:
+            break
+        nudges_left -= 1
+        prompt = NUDGE_MSG.format(
+            labels=", ".join(repr(x) for x in dangling),
+            stored=", ".join(repr(k) for k in kernel) or "nothing",
+        )
+        yield {"type": "status", "text": "checking element chips"}
+    yield {
+        "type": "answer",
+        "text": answer.text,
+        "element_groups": groups,
+        "sufficient_info": answer.sufficient_info,
+    }
+
+
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -283,17 +329,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             try:
                 # Stale groups from the previous question must not leak into this one.
                 await run_in_threadpool(_clear_answer_elements, s.interp)
-                async for ev in stream_turn(s.agent, s.thread_id, message):
-                    if ev["type"] == "answer":
-                        ans: Answer = ev["answer"]
-                        kernel = await run_in_threadpool(_read_answer_elements, s.interp)
-                        groups = await run_in_threadpool(_enrich, s.ifc, ans, kernel)
-                        ev = {
-                            "type": "answer",
-                            "text": ans.text,
-                            "element_groups": groups,
-                            "sufficient_info": ans.sufficient_info,
-                        }
+                async for ev in _answer_turn(s, message):
                     yield _sse(ev)
             except Exception as exc:  # surface any agent failure to the UI
                 log.exception("chat failed")

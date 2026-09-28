@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from backend.interpreter import TRUNCATION_MARKER, JupyterInterpreter
 from backend.llm import init_llm
-from backend.prompts import SYSTEM_PROMPT, WRAP_UP_MSG
+from backend.prompts import WRAP_UP_MSG, PromptVariant, get_variant
 
 TOOL_NAME = "python_exec"
 DEFAULT_CAP = 15
@@ -85,19 +85,21 @@ class OnlyPythonCapMiddleware(AgentMiddleware):
     is to answer.
     """
 
-    def __init__(self, *, cap: int = DEFAULT_CAP) -> None:
+    def __init__(self, *, system_prompt: str, wrap_up: str, cap: int = DEFAULT_CAP) -> None:
         super().__init__()
+        self._system = SystemMessage(content=system_prompt)
+        self._wrap_up = wrap_up
         self._cap = cap
 
     def _adjust(self, request: ModelRequest) -> ModelRequest:
         tools = [t for t in request.tools if getattr(t, "name", None) == TOOL_NAME]
         overrides: dict[str, Any] = {
             "tools": tools,
-            "system_message": SystemMessage(content=SYSTEM_PROMPT),
+            "system_message": self._system,
         }
         if _rounds_this_turn(request.state.get("messages", [])) >= self._cap:
             overrides["tools"] = []
-            overrides["messages"] = [*request.messages, HumanMessage(content=WRAP_UP_MSG)]
+            overrides["messages"] = [*request.messages, HumanMessage(content=self._wrap_up)]
         return request.override(**overrides)
 
     def wrap_model_call(
@@ -115,8 +117,14 @@ class OnlyPythonCapMiddleware(AgentMiddleware):
         return await handler(self._adjust(request))
 
 
-def create_ifc_agent(interp: JupyterInterpreter, *, cap: int = DEFAULT_CAP):
+def create_ifc_agent(
+    interp: JupyterInterpreter,
+    *,
+    variant: PromptVariant | None = None,
+    cap: int = DEFAULT_CAP,
+):
     """Build the agent bound to one model's kernel, with its own in-memory checkpointer."""
+    variant = variant or get_variant()
 
     @tool(TOOL_NAME)
     def python_exec(code: str) -> str:
@@ -131,8 +139,10 @@ def create_ifc_agent(interp: JupyterInterpreter, *, cap: int = DEFAULT_CAP):
     return create_deep_agent(
         model=init_llm(),
         tools=[python_exec],
-        system_prompt=SYSTEM_PROMPT,
-        middleware=[OnlyPythonCapMiddleware(cap=cap)],
+        system_prompt=variant.system,
+        middleware=[
+            OnlyPythonCapMiddleware(system_prompt=variant.system, wrap_up=variant.wrap_up, cap=cap)
+        ],
         response_format=ToolStrategy(Answer),
         # The structured Answer lives in checkpointed state; allow it explicitly.
         checkpointer=InMemorySaver(
@@ -146,7 +156,9 @@ def create_ifc_agent(interp: JupyterInterpreter, *, cap: int = DEFAULT_CAP):
     )
 
 
-async def stream_turn(agent, thread_id: str, message: str) -> AsyncIterator[dict]:
+async def stream_turn(
+    agent, thread_id: str, message: str, *, wrap_up: str = WRAP_UP_MSG
+) -> AsyncIterator[dict]:
     """Run one user question and yield raw events as they happen.
 
     Yields dicts with ``type`` in {status, code, output, answer}. The answer
@@ -187,7 +199,7 @@ async def stream_turn(agent, thread_id: str, message: str) -> AsyncIterator[dict
                         yield {"type": "status", "text": "thinking"}
         if answer is not None:
             break
-        payload = {"messages": [HumanMessage(content=WRAP_UP_MSG)]}
+        payload = {"messages": [HumanMessage(content=wrap_up)]}
 
     if answer is None:
         raise RuntimeError("The agent ended without producing an answer.")
