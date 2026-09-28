@@ -265,14 +265,25 @@ def _enrich(ifc: ifcopenshell.file, answer: Answer, kernel: dict[str, list[str]]
 
     Ids come from the kernel's `answer_elements` (matched by label) or, as a
     fallback, from the hand-listed `global_ids`. If the answer lists no group
-    but the kernel holds some, all kernel groups are shown. Unknown ids and
-    empty groups are dropped, each group is capped at MAX_GROUP_SIZE, and the
-    label gets the resolved count.
+    but the kernel holds some, all kernel groups are shown; the same holds
+    when the listed groups all resolve to nothing. Unknown ids and empty
+    groups are dropped, each group is capped at MAX_GROUP_SIZE, and the label
+    gets the resolved count.
+
+    The fallback groups carry kernel labels, which in practice match none of
+    the listed labels (a listed label that matched one resolved to nothing),
+    so `_answer_turn` still sees every listed label as dangling and nudges
+    first; the fallback is what remains after the nudge.
     """
     if answer.element_groups:
         wanted = [(g.label, _group_ids(g.label, g.global_ids, kernel)) for g in answer.element_groups]
-    else:
-        wanted = list(kernel.items())
+        groups = _resolve_groups(ifc, wanted)
+        if groups or not kernel:
+            return groups
+    return _resolve_groups(ifc, list(kernel.items()))
+
+
+def _resolve_groups(ifc: ifcopenshell.file, wanted: list[tuple[str, list[str]]]) -> list[dict]:
     groups = []
     for label, ids in wanted:
         seen: set[str] = set()
