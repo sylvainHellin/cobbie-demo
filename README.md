@@ -72,6 +72,12 @@ uv run python scripts/smoke_backend.py
 It asserts the API contract hard (event types and order, one answer, `done` last, non-empty text, every element id resolving in the model to an expected class) and checks group content on the union of all groups (the 5 doors of fzk_house, all 57 walls of duplex), since the agent may split elements differently from run to run.
 A follow-up answer without groups, or walls not passed through `answer_elements`, prints a warning instead of failing.
 
+Session lifecycle check, in-process and without LLM calls (closing old sessions on a new upload, clean failure when the key or kernel setup fails, chip fallback):
+
+```sh
+uv run python scripts/check_sessions.py
+```
+
 Prompt evaluation, in-process against the live LLM, over 14 fixed questions on both samples (element, aggregate, non-element and a three-turn follow-up conversation), scored against ground truth computed with ifcopenshell:
 
 ```sh
