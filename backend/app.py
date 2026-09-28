@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from backend.agent import Answer, create_ifc_agent, stream_turn
 from backend.interpreter import JupyterInterpreter
-from backend.llm import model_name
+from backend.llm import init_llm, model_name
 from backend.prompts import NUDGE_MSG, PromptVariant, get_variant
 
 log = logging.getLogger("cobbie")
@@ -162,9 +162,19 @@ def _create_session(filename: str, data: bytes) -> Session:
     except Exception as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(422, f"Not a readable IFC file: {exc}") from exc
-    interp = JupyterInterpreter(preamble=_preamble(path))
-    variant = get_variant()
-    agent = create_ifc_agent(interp, variant=variant)
+    interp: JupyterInterpreter | None = None
+    try:
+        # Variant and LLM (API key) first, so a config error starts no kernel.
+        variant = get_variant()
+        llm = init_llm()
+        interp = JupyterInterpreter(preamble=_preamble(path))
+        agent = create_ifc_agent(interp, variant=variant, llm=llm)
+    except Exception as exc:
+        log.exception("session setup failed")
+        if interp is not None:
+            interp.shutdown()
+        path.unlink(missing_ok=True)
+        raise HTTPException(500, detail=str(exc)) from exc
     return Session(model_id, filename, path, ifc, interp, agent, variant)
 
 

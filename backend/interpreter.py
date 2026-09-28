@@ -74,12 +74,16 @@ class JupyterInterpreter:
         )
         self.km.start_kernel()
         self.kc = self.km.blocking_client()
-        self.kc.start_channels()
-        self.kc.wait_for_ready(timeout=60)
-        if preamble:
-            res = self.execute(preamble, timeout=120)
-            if "Traceback" in res.text or res.timed_out:
-                raise RuntimeError(f"Kernel preamble failed:\n{res.text}")
+        try:
+            self.kc.start_channels()
+            self.kc.wait_for_ready(timeout=60)
+            if preamble:
+                res = self.execute(preamble, timeout=120)
+                if "Traceback" in res.text or res.timed_out:
+                    raise RuntimeError(f"Kernel preamble failed:\n{res.text}")
+        except BaseException:
+            self.shutdown()
+            raise
 
     def run(self, code: str, timeout: int = 60) -> str:
         return self.execute(code, timeout=timeout).text

@@ -122,8 +122,13 @@ def create_ifc_agent(
     *,
     variant: PromptVariant | None = None,
     cap: int = DEFAULT_CAP,
+    llm=None,
 ):
-    """Build the agent bound to one model's kernel, with its own in-memory checkpointer."""
+    """Build the agent bound to one model's kernel, with its own in-memory checkpointer.
+
+    ``llm`` defaults to ``init_llm()``; pass one built earlier to fail fast
+    (e.g. on a missing API key) before a kernel is started.
+    """
     variant = variant or get_variant()
 
     @tool(TOOL_NAME)
@@ -137,7 +142,7 @@ def create_ifc_agent(
         return interp.run(code)
 
     return create_deep_agent(
-        model=init_llm(),
+        model=llm if llm is not None else init_llm(),
         tools=[python_exec],
         system_prompt=variant.system,
         middleware=[
