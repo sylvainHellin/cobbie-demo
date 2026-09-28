@@ -6,6 +6,7 @@ Run: uv run uvicorn backend.app:app --port 8000
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -42,6 +43,7 @@ class Session:
     interp: JupyterInterpreter
     agent: object
     variant: PromptVariant
+    seq: int = 0
     thread: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -51,6 +53,10 @@ class Session:
 
 
 SESSIONS: dict[str, Session] = {}
+# Single-user demo: a new upload closes all older sessions (kernel + file).
+# scripts/eval_prompt.py turns this off to run conversations in parallel.
+SINGLE_SESSION = True
+_UPLOAD_SEQ = itertools.count(1)
 
 # Kernel-variable handoff: the agent stores answer groups in `answer_elements`
 # (label -> GlobalIds or entities) and the backend reads them after the turn.
@@ -178,6 +184,11 @@ def _create_session(filename: str, data: bytes) -> Session:
     return Session(model_id, filename, path, ifc, interp, agent, variant)
 
 
+def _close_session(s: Session) -> None:
+    s.interp.shutdown()
+    s.path.unlink(missing_ok=True)
+
+
 @app.post("/api/models")
 async def upload_model(file: UploadFile = File(...)) -> dict:
     filename = file.filename or "model.ifc"
@@ -186,8 +197,16 @@ async def upload_model(file: UploadFile = File(...)) -> dict:
     data = await file.read()
     if not data:
         raise HTTPException(400, "Empty file.")
+    seq = next(_UPLOAD_SEQ)
     session = await run_in_threadpool(_create_session, filename, data)
+    session.seq = seq
     SESSIONS[session.model_id] = session
+    if SINGLE_SESSION:
+        # Close sessions uploaded before this one; one uploaded later (a
+        # faster concurrent upload) is the one the UI shows, so it stays.
+        stale = [mid for mid, s in SESSIONS.items() if s.seq < seq]
+        for mid in stale:
+            await run_in_threadpool(_close_session, SESSIONS.pop(mid))
     return {
         "model_id": session.model_id,
         "filename": filename,

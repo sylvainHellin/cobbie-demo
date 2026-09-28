@@ -211,6 +211,8 @@ def _recording_enrich(ifc, answer, kernel):
 
 
 appmod._enrich = _recording_enrich
+# Conversations run in parallel; an upload must not close the other workers' sessions.
+appmod.SINGLE_SESSION = False
 
 
 def _usage(session, n0: int) -> tuple[int, int, int, int]:

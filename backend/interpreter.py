@@ -26,6 +26,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8192
 # Keep 70% head and 30% tail of truncated output.
 _HEAD_FRACTION = 0.70
 TRUNCATION_MARKER = "[OUTPUT TRUNCATED"
+_CLOSED_TEXT = "[Interpreter shut down] This model's kernel was closed; stop and answer."
 
 _ENCODING = tiktoken.get_encoding("cl100k_base")
 
@@ -65,6 +66,7 @@ class JupyterInterpreter:
         self.max_output_tokens = max_output_tokens
         self._preamble = preamble
         self._lock = threading.Lock()
+        self._closed = False
         # IPC sockets: local-only, and no plain-TCP warning from the kernel.
         # Socket files go to the temp dir, not the working directory.
         self.km = jupyter_client.KernelManager(
@@ -95,7 +97,13 @@ class JupyterInterpreter:
         that never reach the LLM.
         """
         with self._lock:
-            return self._execute_locked(code, timeout, truncate=truncate)
+            try:
+                if self._closed:
+                    return ExecResult(_CLOSED_TEXT)
+                return self._execute_locked(code, timeout, truncate=truncate)
+            finally:
+                if self._closed:  # shut down mid-run: this thread owns the channels
+                    self._stop_channels()
 
     def _execute_locked(self, code: str, timeout: int, *, truncate: bool = True) -> ExecResult:
         msg_id = self.kc.execute(code)
@@ -103,15 +111,17 @@ class JupyterInterpreter:
         deadline = time.monotonic() + timeout
         timed_out = False
         while True:
+            if self._closed:
+                return ExecResult(_CLOSED_TEXT)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
                 break
             try:
-                msg = self.kc.get_iopub_msg(timeout=remaining)
+                # Short polls so a shutdown from another thread is noticed quickly.
+                msg = self.kc.get_iopub_msg(timeout=min(remaining, 1.0))
             except Empty:
-                timed_out = True
-                break
+                continue
             except Exception:
                 break
             if msg.get("parent_header", {}).get("msg_id") != msg_id:
@@ -126,6 +136,8 @@ class JupyterInterpreter:
                 parts.append(_ANSI_RE.sub("", "\n".join(content.get("traceback", []))))
             elif msg_type == "status" and content.get("execution_state") == "idle":
                 break
+        if self._closed:
+            return ExecResult(_CLOSED_TEXT)
         if timed_out:
             self._recover_from_timeout()
             return ExecResult(
@@ -171,6 +183,8 @@ class JupyterInterpreter:
             pass
 
     def _restart_locked(self) -> None:
+        if self._closed:
+            return
         self.km.restart_kernel(now=True)
         self.kc.wait_for_ready(timeout=60)
         if self._preamble:
@@ -182,11 +196,27 @@ class JupyterInterpreter:
             self._restart_locked()
 
     def shutdown(self) -> None:
-        try:
-            self.kc.stop_channels()
-        except Exception:
-            pass
+        """Kill the kernel; safe while another thread is executing on it.
+
+        A running ``execute`` notices the flag within a second, returns a
+        short notice instead of raising, and closes the channels itself, so
+        no two threads touch the same ZMQ sockets.
+        """
+        self._closed = True
         try:
             self.km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+        # A running execute returns within about a second; if it is still busy
+        # (e.g. draining after a timeout), it closes the channels itself.
+        if self._lock.acquire(timeout=5):
+            try:
+                self._stop_channels()
+            finally:
+                self._lock.release()
+
+    def _stop_channels(self) -> None:
+        try:
+            self.kc.stop_channels()
         except Exception:
             pass
