@@ -196,7 +196,10 @@ export default function App() {
         ? 'Preparing the agent for this model\u2026'
         : upload.status === 'error'
           ? `The agent is unavailable: ${upload.message}`
-          : null
+          : viewerLoad.status !== 'ready' && viewerLoad.status !== 'error'
+            ? // Chips resolve against the viewer model, so wait for it.
+              'Loading model in viewer\u2026'
+            : null
 
   return (
     <div className="app">
