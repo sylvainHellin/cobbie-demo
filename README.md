@@ -19,6 +19,7 @@ cd frontend && pnpm install
 
 If `ZAI_API_KEY` is empty, the backend reads the `zai-api` key from `~/.pi/agent/auth.json`.
 `COBBIE_MODEL` (default `glm-5.3-flash`) and `COBBIE_BASE_URL` (default `https://api.z.ai/api/paas/v4`) select the model.
+`COBBIE_PROMPT` selects a system-prompt variant from `backend/prompts.py` (default `strict_nudge`).
 
 ## Run
 
@@ -70,7 +71,17 @@ uv run python scripts/smoke_backend.py
 
 It asserts the API contract hard (event types and order, one answer, `done` last, non-empty text, every element id resolving in the model to an expected class) and checks group content on the union of all groups (the 5 doors of fzk_house, all 57 walls of duplex), since the agent may split elements differently from run to run.
 A follow-up answer without groups, or walls not passed through `answer_elements`, prints a warning instead of failing.
-The agent can still occasionally skip the groups on the first question, which fails the run.
+
+Prompt evaluation, in-process against the live LLM, over 14 fixed questions on both samples (element, aggregate, non-element and a three-turn follow-up conversation), scored against ground truth computed with ifcopenshell:
+
+```sh
+uv run python scripts/eval_prompt.py --variant strict_nudge --reps 2 --workers 3
+uv run python scripts/eval_prompt.py --variant demo,strict --only fzk_doors   # a subset; a conversation runs whole
+uv run python scripts/eval_prompt.py --summarize .agents/research/eval-runs/*.jsonl
+```
+
+It reports per variant whether element answers show chips covering the target elements, whether non-element answers show none, text correctness, labels that resolved to no element, nudges, latency, code rounds, LLM calls and tokens.
+Per-turn records go to `.agents/research/eval-runs/` (gitignored).
 
 End-to-end check in headless Chrome, driven over the DevTools protocol with Node's built-in WebSocket (no extra packages):
 
@@ -99,6 +110,7 @@ Other variables: `CHROME` (browser binary; defaults to Google Chrome on macOS an
 3. `backend/agent.py` builds a deepagents agent whose only tool is `python_exec`, capped at 15 code rounds per question before it must answer.
 4. The agent hands elements to the answer through the kernel dict `answer_elements` (label to GlobalIds or entities), which the server clears at the start of each question, so large groups never pass through the LLM.
 5. The agent ends each turn with a structured `Answer` (text, the labels of the groups to show, sufficient_info); hand-listed `global_ids` per group still work as a fallback, and an in-memory LangGraph checkpointer gives follow-up questions the earlier turns.
+   If the Answer lists a label that resolves to no element (typically a follow-up answered from memory without storing the group), the server sends one corrective message and the agent stores the group and answers again; this happens at most once per question.
 6. After the turn the server reads `answer_elements` from the kernel, resolves each GlobalId against the in-process model (IFC class, name), drops unknown ids, caps each group at 5000 elements, and streams code, outputs and the answer to the UI as they happen.
 
 Frontend (`frontend/src/`, Vite, React, TypeScript, plain CSS):
